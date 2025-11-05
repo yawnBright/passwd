@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 // use dirs;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
-    pub local_storage: Option<LocalStorageConfig>,
+    pub local_storage: LocalStorageConfig,
     pub github_storage: Option<GithubStorageConfig>,
 }
 
@@ -26,16 +26,16 @@ pub struct GithubStorageConfig {
     pub file_path: String,
 }
 
-// #[derive(Debug, Clone, Serialize, Deserialize)]
-// pub struct SecurityConfig {
-//     pub encryption_salt: Vec<u8>,
-//     pub double_encrypt_descriptions: bool, // 是否双重加密描述信息
-// }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityConfig {
+    pub encryption_salt: Vec<u8>,
+    pub double_encrypt_descriptions: bool, // 是否双重加密描述信息
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub storage: StorageConfig,
-    // pub security: SecurityConfig,
+    pub security: SecurityConfig,
     pub version: String,
 }
 
@@ -47,16 +47,16 @@ impl Default for Config {
 
         Self {
             storage: StorageConfig {
-                local_storage: Some(LocalStorageConfig {
+                local_storage: LocalStorageConfig {
                     enabled: true,
                     data_path: data_dir.join("passwords.json"),
-                }),
+                },
                 github_storage: None,
             },
-            // security: SecurityConfig {
-            //     encryption_salt: vec![0u8; 32],
-            //     double_encrypt_descriptions: false,
-            // },
+            security: SecurityConfig {
+                encryption_salt: vec![0u8; 32],
+                double_encrypt_descriptions: false,
+            },
             version: "1.0.0".to_string(),
         }
     }
@@ -91,7 +91,6 @@ impl Config {
         Ok(())
     }
 
-    // FIXME: android 文件系统限制
     pub fn get_config_path() -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -99,26 +98,27 @@ impl Config {
             .join("config.json")
     }
 
-    // pub fn validate(&self) -> Result<()> {
-    //     if self.storage.local_storage.enabled
-    //         && self.storage.local_storage.data_path.as_os_str().is_empty()
-    //     {
-    //         return Err(anyhow!("Local storage path cannot be empty"));
-    //     }
-    //
-    //     if let Some(github) = &self.storage.github_storage {
-    //         if github.enabled {
-    //             if github.owner.is_empty() || github.repo.is_empty() || github.token.is_empty() {
-    //                 return Err(anyhow!("GitHub storage configuration is incomplete"));
-    //             }
-    //         }
-    //     }
-    //
-    //     Ok(())
-    // }
+    pub fn validate(&self) -> Result<()> {
+        if self.storage.local_storage.enabled
+            && self.storage.local_storage.data_path.as_os_str().is_empty()
+        {
+            return Err(anyhow!("Local storage path cannot be empty"));
+        }
 
-    // // 不再需要设置主密码哈希 - 直接使用主密钥验证
-    // pub fn set_encryption_salt(&mut self, salt: Vec<u8>) {
-    //     self.security.encryption_salt = salt;
-    // }
+        if let Some(github) = &self.storage.github_storage {
+            if github.enabled {
+                if github.owner.is_empty() || github.repo.is_empty() || github.token.is_empty() {
+                    return Err(anyhow!("GitHub storage configuration is incomplete"));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // 不再需要设置主密码哈希 - 直接使用主密钥验证
+    pub fn set_encryption_salt(&mut self, salt: Vec<u8>) {
+        self.security.encryption_salt = salt;
+    }
 }
+

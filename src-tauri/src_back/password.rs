@@ -1,21 +1,17 @@
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use chrono::{DateTime, Utc};
 
-// use crate::simple_crypto::RobustEncryptedData;
-use crate::crypto::EncryptedData;
+use crate::simple_crypto::RobustEncryptedData;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Password {
     pub id: String,
-    /// 标题 用于展示和搜索
     pub title: String,
-    /// 描述 用于展示和搜索
     pub description: String, // 明文描述，不再加密
-    /// 标签 用于分类
     pub tags: Vec<String>,
-    pub username: String,                  // 明文用户名，不再加密
-    pub encrypted_password: EncryptedData, // 仅加密密码字段
-    pub url: Option<String>,               // 明文URL，不再加密
+    pub username: String, // 明文用户名，不再加密
+    pub encrypted_password: RobustEncryptedData, // 仅加密密码字段
+    pub url: Option<String>, // 明文URL，不再加密
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -26,10 +22,8 @@ pub struct PasswordCreateRequest {
     pub description: String,
     pub tags: Vec<String>,
     pub username: String,
-    /// 明文密码
-    pub password: String,
+    pub password: String, // 明文密码
     pub url: Option<String>,
-    pub key: String, // 用于加密的密码
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,7 +46,7 @@ pub struct PasswordSearchQuery {
 }
 
 impl Password {
-    pub fn new(request: PasswordCreateRequest, encrypted_password: EncryptedData) -> Self {
+    pub fn new(request: PasswordCreateRequest, encrypted_password: RobustEncryptedData) -> Self {
         let now = Utc::now();
         Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -68,7 +62,7 @@ impl Password {
     }
 
     #[allow(dead_code)]
-    pub fn update(&mut self, request: PasswordUpdateRequest, encrypted_password: EncryptedData) {
+    pub fn update(&mut self, request: PasswordUpdateRequest, encrypted_password: Option<RobustEncryptedData>) {
         if let Some(title) = request.title {
             self.title = title;
         }
@@ -81,10 +75,9 @@ impl Password {
         if let Some(username) = request.username {
             self.username = username;
         }
-        // if let Some(password) = encrypted_password {
-        //     self.encrypted_password = password;
-        // }
-        self.encrypted_password = encrypted_password;
+        if let Some(password) = encrypted_password {
+            self.encrypted_password = password;
+        }
         if let Some(url) = request.url {
             self.url = Some(url);
         }

@@ -2,8 +2,8 @@
 name = "passwd"
 version = "0.1.0"
 description = "A Tauri App"
-authors = ["you"]
-edition = "2021"
+authors = ["yawnbright"]
+edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -34,10 +34,13 @@ async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 rand = "0.9"
 aes-gcm = "0.10"
-argon2 = "0.5"
+sha2 = "0.10"
+# argon2 = "0.5"
 password-hash = "0.5"
 dirs = "6.0"
 rpassword = "7.0"
 colored = "3.0"
 indicatif = "0.18"
-
+uuid = { version = "1.0", features = ["v4", "serde"] }
+log = "0.4"
+tempfile = "3.0"

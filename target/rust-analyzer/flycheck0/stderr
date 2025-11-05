@@ -1,0 +1,104 @@
+   0.257441583s  INFO prepare_target{force=false package_id=passwd v0.1.0 (/Users/bytedance/projects/tauri/passwd/src-tauri) target="passwd_lib"}: cargo::core::compiler::fingerprint: fingerprint error for passwd v0.1.0 (/Users/bytedance/projects/tauri/passwd/src-tauri)/Check { test: false }/TargetInner { ..: lib_target("passwd_lib", ["staticlib", "cdylib", "rlib"], "/Users/bytedance/projects/tauri/passwd/src-tauri/src/lib.rs", Edition2024) }
+   0.257502833s  INFO prepare_target{force=false package_id=passwd v0.1.0 (/Users/bytedance/projects/tauri/passwd/src-tauri) target="passwd_lib"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/bytedance/projects/tauri/passwd/src-tauri/target/debug/.fingerprint/passwd-20cc785a834ba82e/lib-passwd_lib`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: std::backtrace::Backtrace::capture
+   2: cargo_util::paths::read_bytes
+   3: cargo_util::paths::read
+   4: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   5: cargo::core::compiler::fingerprint::prepare_target
+   6: cargo::core::compiler::compile
+   7: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   8: cargo::ops::cargo_compile::compile_ws
+   9: cargo::ops::cargo_compile::compile_with_exec
+  10: cargo::ops::cargo_compile::compile
+  11: cargo::commands::check::exec
+  12: <cargo::cli::Exec>::exec
+  13: cargo::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  15: std::rt::lang_start::<()>::{closure#0}
+  16: std::rt::lang_start_internal
+  17: _main
+   0.304746208s  INFO prepare_target{force=false package_id=passwd v0.1.0 (/Users/bytedance/projects/tauri/passwd/src-tauri) target="passwd_lib"}: cargo::core::compiler::fingerprint: fingerprint error for passwd v0.1.0 (/Users/bytedance/projects/tauri/passwd/src-tauri)/Check { test: true }/TargetInner { ..: lib_target("passwd_lib", ["staticlib", "cdylib", "rlib"], "/Users/bytedance/projects/tauri/passwd/src-tauri/src/lib.rs", Edition2024) }
+   0.304759375s  INFO prepare_target{force=false package_id=passwd v0.1.0 (/Users/bytedance/projects/tauri/passwd/src-tauri) target="passwd_lib"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/bytedance/projects/tauri/passwd/src-tauri/target/debug/.fingerprint/passwd-4ab11c17a5ee6f55/test-lib-passwd_lib`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: std::backtrace::Backtrace::capture
+   2: cargo_util::paths::read_bytes
+   3: cargo_util::paths::read
+   4: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   5: cargo::core::compiler::fingerprint::prepare_target
+   6: cargo::core::compiler::compile
+   7: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   8: cargo::ops::cargo_compile::compile_ws
+   9: cargo::ops::cargo_compile::compile_with_exec
+  10: cargo::ops::cargo_compile::compile
+  11: cargo::commands::check::exec
+  12: <cargo::cli::Exec>::exec
+  13: cargo::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  15: std::rt::lang_start::<()>::{closure#0}
+  16: std::rt::lang_start_internal
+  17: _main
+   0.305765625s  INFO prepare_target{force=false package_id=passwd v0.1.0 (/Users/bytedance/projects/tauri/passwd/src-tauri) target="passwd"}: cargo::core::compiler::fingerprint: fingerprint error for passwd v0.1.0 (/Users/bytedance/projects/tauri/passwd/src-tauri)/Check { test: false }/TargetInner { name: "passwd", doc: true, ..: with_path("/Users/bytedance/projects/tauri/passwd/src-tauri/src/main.rs", Edition2024) }
+   0.305770333s  INFO prepare_target{force=false package_id=passwd v0.1.0 (/Users/bytedance/projects/tauri/passwd/src-tauri) target="passwd"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/bytedance/projects/tauri/passwd/src-tauri/target/debug/.fingerprint/passwd-7ed89142d58ede41/bin-passwd`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: std::backtrace::Backtrace::capture
+   2: cargo_util::paths::read_bytes
+   3: cargo_util::paths::read
+   4: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   5: cargo::core::compiler::fingerprint::prepare_target
+   6: cargo::core::compiler::compile
+   7: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   8: cargo::ops::cargo_compile::compile_ws
+   9: cargo::ops::cargo_compile::compile_with_exec
+  10: cargo::ops::cargo_compile::compile
+  11: cargo::commands::check::exec
+  12: <cargo::cli::Exec>::exec
+  13: cargo::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  15: std::rt::lang_start::<()>::{closure#0}
+  16: std::rt::lang_start_internal
+  17: _main
+   0.306854042s  INFO prepare_target{force=false package_id=passwd v0.1.0 (/Users/bytedance/projects/tauri/passwd/src-tauri) target="passwd"}: cargo::core::compiler::fingerprint: fingerprint error for passwd v0.1.0 (/Users/bytedance/projects/tauri/passwd/src-tauri)/Check { test: true }/TargetInner { name: "passwd", doc: true, ..: with_path("/Users/bytedance/projects/tauri/passwd/src-tauri/src/main.rs", Edition2024) }
+   0.306859333s  INFO prepare_target{force=false package_id=passwd v0.1.0 (/Users/bytedance/projects/tauri/passwd/src-tauri) target="passwd"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/bytedance/projects/tauri/passwd/src-tauri/target/debug/.fingerprint/passwd-9dd10400cf62bb4d/test-bin-passwd`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: std::backtrace::Backtrace::create
+   1: std::backtrace::Backtrace::capture
+   2: cargo_util::paths::read_bytes
+   3: cargo_util::paths::read
+   4: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   5: cargo::core::compiler::fingerprint::prepare_target
+   6: cargo::core::compiler::compile
+   7: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   8: cargo::ops::cargo_compile::compile_ws
+   9: cargo::ops::cargo_compile::compile_with_exec
+  10: cargo::ops::cargo_compile::compile
+  11: cargo::commands::check::exec
+  12: <cargo::cli::Exec>::exec
+  13: cargo::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  15: std::rt::lang_start::<()>::{closure#0}
+  16: std::rt::lang_start_internal
+  17: _main
+    Checking passwd v0.1.0 (/Users/bytedance/projects/tauri/passwd/src-tauri)
+error: could not compile `passwd` (lib test) due to 11 previous errors; 6 warnings emitted
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `passwd` (lib) due to 11 previous errors; 6 warnings emitted

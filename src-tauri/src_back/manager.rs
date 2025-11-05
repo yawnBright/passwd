@@ -1,19 +1,23 @@
-use anyhow::{Result, anyhow};
-use chrono::{DateTime, Utc};
+use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use chrono::{DateTime, Utc};
 
 use crate::config::Config;
+use crate::crypto::{CryptoService, MasterKey};
+use crate::github_client::GithubClient;
+use crate::github_store::GithubStorage;
+use crate::password::{Password, PasswordCreateRequest, PasswordUpdateRequest, PasswordSearchQuery, PasswordGeneratorConfig};
+use crate::simple_crypto::SimpleCrypto;
+use crate::store::{Storage, StorageData, LocalStorage};
 
-use crate::crypto;
-use crate::password::{
-    Password, PasswordCreateRequest, PasswordGeneratorConfig, PasswordSearchQuery,
-    PasswordUpdateRequest,
-};
-use crate::store::github_store::GithubStorage;
-use crate::store::local_store::LocalStorage;
-use crate::store::{Storage, StorageData, StorageTarget};
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StorageTarget {
+    Local,
+    GitHub,
+    All, // 查询时使用，表示查询所有存储点
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StorageStatus {
@@ -24,44 +28,51 @@ pub struct StorageStatus {
     pub error: Option<String>,
 }
 
-// 每个存储点是独立的、互不干扰的(防止数据覆盖丢失)
-// 后续考虑设计存储点间的数据同步机制
-
 pub struct PasswordManager {
     config: Arc<RwLock<Config>>,
+    #[allow(dead_code)]
+    crypto_service: Arc<CryptoService>, // 占位符，实际不使用
+    simple_crypto: Arc<SimpleCrypto>,
     storages: HashMap<StorageTarget, Arc<dyn Storage>>, // 所有启用的存储点
-    cache: Arc<RwLock<HashMap<StorageTarget, StorageData>>>,
+    cache: Arc<RwLock<HashMap<String, Password>>>,
 }
 
 impl PasswordManager {
     pub async fn new(config: Config) -> Result<Self> {
+        // 不再需要主密钥，使用简单的内置密钥进行数据混淆
+        let simple_crypto = Arc::new(SimpleCrypto::new());
+        
         // 初始化所有启用的存储点
         let mut storages = HashMap::new();
-
+        
         // 初始化本地存储（如果启用）
-        if let Some(local_config) = &config.storage.local_storage {
-            if local_config.enabled {
-                let local_storage = Arc::new(LocalStorage::new(local_config.data_path.clone()));
-                storages.insert(StorageTarget::Local, local_storage as Arc<dyn Storage>);
-            }
+        if config.storage.local_storage.enabled {
+            let local_storage = Arc::new(LocalStorage::new(config.storage.local_storage.data_path.clone()));
+            storages.insert(StorageTarget::Local, local_storage as Arc<dyn Storage>);
         }
-
+        
         // 初始化GitHub存储（如果启用）
         if let Some(github_config) = &config.storage.github_storage {
             if github_config.enabled {
-                let github_storage = Arc::new(GithubStorage::new(
+                let client = GithubClient::new(
                     github_config.owner.clone(),
                     github_config.repo.clone(),
                     github_config.token.clone(),
                     github_config.branch.clone(),
-                    github_config.file_path.clone(),
-                ));
+                );
+                let github_storage = Arc::new(GithubStorage::new(client, github_config.file_path.clone()));
                 storages.insert(StorageTarget::GitHub, github_storage as Arc<dyn Storage>);
             }
+        }
+        
+        if storages.is_empty() {
+            return Err(anyhow!("At least one storage must be enabled"));
         }
 
         let manager = Self {
             config: Arc::new(RwLock::new(config)),
+            crypto_service: Arc::new(CryptoService::new(MasterKey::new(vec![0u8; 32]))), // 占位符，实际不使用
+            simple_crypto,
             storages,
             cache: Arc::new(RwLock::new(HashMap::new())),
         };
@@ -72,18 +83,33 @@ impl PasswordManager {
         Ok(manager)
     }
 
-    pub async fn add_password(&self, request: PasswordCreateRequest) -> Result<()> {
-        let encrypted_password = crypto::encrypt_with_password(&request.password, &request.key)?;
+    pub async fn add_password(&self, request: PasswordCreateRequest) -> Result<Password> {
+        // 使用简单加密混淆密码（内置密钥888）
+        let encrypted_password = self
+            .simple_crypto
+            .encrypt_with_checksum(&request.password)?;
 
         // 创建密码对象
         let password = Password::new(request, encrypted_password);
         let password_id = password.id.clone();
 
         // 添加到缓存
-        // self.cache
-        //     .write()
-        //     .await
-        //     .insert(password_id.clone(), password);
+        self.cache
+            .write()
+            .await
+            .insert(password_id.clone(), password.clone());
+
+        // 保存到存储
+        self.save_data().await?;
+
+        Ok(password)
+    }
+
+    pub async fn delete_password(&self, password_id: &str) -> Result<()> {
+        // 从缓存中删除
+        if self.cache.write().await.remove(password_id).is_none() {
+            return Err(anyhow!("Password not found"));
+        }
 
         // 保存到存储
         self.save_data().await?;
@@ -91,111 +117,83 @@ impl PasswordManager {
         Ok(())
     }
 
-    async fn add_password_to_cache(&self, p: Password) {}
-
-    pub async fn delete_password(&self, password_id: &str) -> Result<()> {
-        // 从缓存中删除
-        // if self.cache.write().await.remove(password_id).is_none() {
-        //     return Err(anyhow!("Password not found"));
-        // }
-
-        // 保存到存储
-        // self.save_data().await?;
-
-        Ok(())
-    }
-
     pub async fn search_passwords(&self, query: &str) -> Result<Vec<Password>> {
-        self.search_passwords_in_storage(query, StorageTarget::All)
-            .await
+        self.search_passwords_in_storage(query, StorageTarget::All).await
     }
 
     /// 在指定存储点中搜索密码
-    pub async fn search_passwords_in_storage(
-        &self,
-        query: &str,
-        target: StorageTarget,
-    ) -> Result<Vec<Password>> {
-        // if target == StorageTarget::All {
-        //     // 使用缓存数据（已合并所有存储点）
-        //     let cache = self.cache.read().await;
-        //     let results: Vec<Password> = cache
-        //         .values()
-        //         .filter(|password| {
-        //             password
-        //                 .title
-        //                 .to_lowercase()
-        //                 .contains(&query.to_lowercase())
-        //                 || password
-        //                     .description
-        //                     .to_lowercase()
-        //                     .contains(&query.to_lowercase())
-        //                 || password
-        //                     .tags
-        //                     .iter()
-        //                     .any(|tag| tag.to_lowercase().contains(&query.to_lowercase()))
-        //         })
-        //         .cloned()
-        //         .collect();
-        //     Ok(results)
-        // } else {
-        //     // 从指定存储点查询
-        //     let data = self.load_from_storage(target).await?;
-        //     let results: Vec<Password> = data
-        //         .passwords
-        //         .values()
-        //         .filter(|password| {
-        //             password
-        //                 .title
-        //                 .to_lowercase()
-        //                 .contains(&query.to_lowercase())
-        //                 || password
-        //                     .description
-        //                     .to_lowercase()
-        //                     .contains(&query.to_lowercase())
-        //                 || password
-        //                     .tags
-        //                     .iter()
-        //                     .any(|tag| tag.to_lowercase().contains(&query.to_lowercase()))
-        //         })
-        //         .cloned()
-        //         .collect();
-        //       Ok(results)
-        Ok(vec![])
+    pub async fn search_passwords_in_storage(&self, query: &str, target: StorageTarget) -> Result<Vec<Password>> {
+        if target == StorageTarget::All {
+            // 使用缓存数据（已合并所有存储点）
+            let cache = self.cache.read().await;
+            let results: Vec<Password> = cache
+                .values()
+                .filter(|password| {
+                    password
+                        .title
+                        .to_lowercase()
+                        .contains(&query.to_lowercase())
+                        || password
+                            .description
+                            .to_lowercase()
+                            .contains(&query.to_lowercase())
+                        || password
+                            .tags
+                            .iter()
+                            .any(|tag| tag.to_lowercase().contains(&query.to_lowercase()))
+                })
+                .cloned()
+                .collect();
+            Ok(results)
+        } else {
+            // 从指定存储点查询
+            let data = self.load_from_storage(target).await?;
+            let results: Vec<Password> = data
+                .passwords
+                .values()
+                .filter(|password| {
+                    password
+                        .title
+                        .to_lowercase()
+                        .contains(&query.to_lowercase())
+                        || password
+                            .description
+                            .to_lowercase()
+                            .contains(&query.to_lowercase())
+                        || password
+                            .tags
+                            .iter()
+                            .any(|tag| tag.to_lowercase().contains(&query.to_lowercase()))
+                })
+                .cloned()
+                .collect();
+            Ok(results)
+        }
     }
 
-    // pub async fn get_all_passwords(&self) -> Result<Vec<Password>> {
-    //     self.get_all_passwords_from_storage(StorageTarget::All)
-    //         .await
-    // }
+    pub async fn get_all_passwords(&self) -> Result<Vec<Password>> {
+        self.get_all_passwords_from_storage(StorageTarget::All).await
+    }
 
-    // 从指定存储点获取所有密码
-    // pub async fn get_all_passwords_from_storage(
-    //     &self,
-    //     target: StorageTarget,
-    // ) -> Result<Vec<Password>> {
-    //     if target == StorageTarget::All {
-    //         // 使用缓存数据（已合并所有存储点）
-    //         let cache = self.cache.read().await;
-    //         Ok(cache.values().cloned().collect())
-    //     } else {
-    //         // 从指定存储点查询
-    //         let data = self.load_from_storage(target).await?;
-    //         Ok(data.passwords.values().cloned().collect())
-    //     }
-    // }
+    /// 从指定存储点获取所有密码
+    pub async fn get_all_passwords_from_storage(&self, target: StorageTarget) -> Result<Vec<Password>> {
+        if target == StorageTarget::All {
+            // 使用缓存数据（已合并所有存储点）
+            let cache = self.cache.read().await;
+            Ok(cache.values().cloned().collect())
+        } else {
+            // 从指定存储点查询
+            let data = self.load_from_storage(target).await?;
+            Ok(data.passwords.values().cloned().collect())
+        }
+    }
 
     pub async fn get_password_by_id(&self, password_id: &str) -> Result<Option<Password>> {
-        self.get_password_by_id_from_storage(password_id, StorageTarget::All)
-            .await
+        self.get_password_by_id_from_storage(password_id, StorageTarget::All).await
     }
 
     /// 从指定存储点根据ID获取密码
-    pub async fn get_password_by_id_from_storage(
-        &self,
-        password_id: &str,
-        target: StorageTarget,
-    ) -> Result<Option<Password>> {
+    pub async fn get_password_by_id_from_storage(&self, password_id: &str, target: StorageTarget) -> Result<Option<Password>> {
         if target == StorageTarget::All {
             // 使用缓存数据（已合并所有存储点）
             let cache = self.cache.read().await;
@@ -271,10 +269,10 @@ impl PasswordManager {
 
     async fn load_data(&self) -> Result<()> {
         let mut all_passwords = HashMap::new();
-
+        
         // 按优先级加载所有存储点的数据（本地优先）
         let storage_order = [StorageTarget::Local, StorageTarget::GitHub];
-
+        
         for &target in &storage_order {
             if let Some(storage) = self.storages.get(&target) {
                 match storage.load().await {
@@ -288,11 +286,11 @@ impl PasswordManager {
                 }
             }
         }
-
+        
         // 更新缓存
         let mut cache = self.cache.write().await;
         cache.extend(all_passwords);
-
+        
         Ok(())
     }
 
@@ -341,26 +339,21 @@ impl PasswordManager {
 
     /// 获取所有启用的存储点
     pub fn get_enabled_storages(&self) -> Vec<(StorageTarget, Arc<dyn Storage>)> {
-        self.storages
-            .iter()
+        self.storages.iter()
             .map(|(&target, storage)| (target, storage.clone()))
             .collect()
     }
 
     /// 从指定存储点加载数据
     pub async fn load_from_storage(&self, target: StorageTarget) -> Result<StorageData> {
-        let storage = self
-            .storages
-            .get(&target)
+        let storage = self.storages.get(&target)
             .ok_or_else(|| anyhow!("Storage target {:?} is not enabled", target))?;
         storage.load().await
     }
 
     /// 保存数据到指定存储点
     pub async fn save_to_storage(&self, target: StorageTarget, data: &StorageData) -> Result<()> {
-        let storage = self
-            .storages
-            .get(&target)
+        let storage = self.storages.get(&target)
             .ok_or_else(|| anyhow!("Storage target {:?} is not enabled", target))?;
         storage.save(data).await
     }
@@ -369,17 +362,17 @@ impl PasswordManager {
     pub async fn sync_storages(&self, from: StorageTarget, to: StorageTarget) -> Result<()> {
         let from_data = self.load_from_storage(from).await?;
         self.save_to_storage(to, &from_data).await?;
-
+        
         // 重新加载缓存
         self.load_data().await?;
-
+        
         Ok(())
     }
 
     /// 获取存储点状态信息
     pub async fn get_storage_status(&self) -> HashMap<StorageTarget, StorageStatus> {
         let mut status = HashMap::new();
-
+        
         for (&target, storage) in &self.storages {
             let storage_status = match storage.load().await {
                 Ok(data) => StorageStatus {
@@ -399,7 +392,7 @@ impl PasswordManager {
             };
             status.insert(target, storage_status);
         }
-
+        
         status
     }
 
@@ -409,3 +402,4 @@ impl PasswordManager {
         Ok(true) // 始终返回true，因为不再使用主密码
     }
 }
+

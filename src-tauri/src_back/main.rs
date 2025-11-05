@@ -2,30 +2,47 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use config::Config;
-use manager::{PasswordManager, StorageStatus};
+use github_client::GithubClient;
+use github_store::GithubStorage;
+use manager::{PasswordManager, StorageStatus, StorageTarget};
 use password::{Password, PasswordCreateRequest, PasswordGeneratorConfig};
 use std::collections::HashMap;
 use std::sync::Arc;
-use store::Storage;
+use store::{LocalStorage, Storage};
 use tokio::sync::RwLock;
 
 mod config;
 mod crypto;
+mod github_client;
+mod github_store;
 mod manager;
 mod password;
-
+mod simple_crypto;
 mod store;
 
 struct AppState {
     password_manager: Arc<RwLock<Option<PasswordManager>>>,
+    config: Arc<RwLock<Config>>,
 }
-// App 启动
-// 加载配置
-//      默认配置文件路径
-//          不存在 --> 新建默认配置
-//          存在   --> 读取并反序列化
+
 fn main() {
+    init_password_manager();
     run_tauri_app();
+}
+
+fn init_password_manager() {
+    // 初始化配置
+    let config_path = Config::get_config_path();
+    let _config = match Config::load_from_file(&config_path) {
+        Ok(config) => config,
+        Err(_) => {
+            let default_config = Config::default();
+            if let Err(e) = default_config.save_to_file(&config_path) {
+                eprintln!("Failed to save default config: {}", e);
+            }
+            default_config
+        }
+    };
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -35,7 +52,7 @@ pub fn run_tauri_app() {
         .plugin(tauri_plugin_fs::init())
         .manage(AppState {
             password_manager: Arc::new(RwLock::new(None)),
-            // config: Arc::new(RwLock::new(Config::default())),
+            config: Arc::new(RwLock::new(Config::default())),
         })
         .invoke_handler(tauri::generate_handler![
             initialize_manager,
@@ -49,8 +66,8 @@ pub fn run_tauri_app() {
             get_password_by_id_from_storage,
             decrypt_password,
             generate_password,
-            // get_current_config,
-            // save_config,
+            get_current_config,
+            save_config,
             get_storage_status,
             sync_storages
         ])
@@ -86,13 +103,53 @@ async fn initialize_manager(
     let config_path = Config::get_config_path();
     let config = Config::load_from_file(&config_path).unwrap_or_else(|_| Config::default());
 
+    // 检查是否存在加密数据 - 检查所有启用的存储点
+    let mut has_encrypted_data = false;
+
+    // 检查本地存储
+    if config.storage.local_storage.enabled {
+        let local_storage = Arc::new(LocalStorage::new(
+            config.storage.local_storage.data_path.clone(),
+        ));
+        if let Ok(result) = local_storage.has_encrypted_data().await {
+            if result {
+                has_encrypted_data = true;
+            }
+        }
+    }
+
+    // 如果没有本地数据，检查GitHub存储
+    if !has_encrypted_data && config.storage.github_storage.is_some() {
+        if let Some(github_config) = &config.storage.github_storage {
+            if github_config.enabled {
+                let client = GithubClient::new(
+                    github_config.owner.clone(),
+                    github_config.repo.clone(),
+                    github_config.token.clone(),
+                    github_config.branch.clone(),
+                );
+                let github_storage =
+                    Arc::new(GithubStorage::new(client, github_config.file_path.clone()));
+                if let Ok(result) = github_storage.has_encrypted_data().await {
+                    if result {
+                        has_encrypted_data = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // 简化场景判断：只基于是否有加密数据
+    let is_first_setup = !has_encrypted_data;
+
+    // 创建管理器（不再需要主密码）
     let password_manager = PasswordManager::new(config.clone())
         .await
         .map_err(ErrorInfo::from)?;
 
     // 更新状态
     *state.password_manager.write().await = Some(password_manager);
-    // *state.config.write().await = config.clone();
+    *state.config.write().await = config.clone();
 
     Ok(InitializeResult {
         is_first_setup,
@@ -211,20 +268,20 @@ async fn generate_password(
         .map_err(ErrorInfo::from)
 }
 
-// #[tauri::command]
-// async fn get_current_config(state: tauri::State<'_, AppState>) -> Result<Config, ErrorInfo> {
-//     let config = state.config.read().await;
-//     Ok(config.clone())
-// }
-//
-// #[tauri::command]
-// async fn save_config(config: Config, state: tauri::State<'_, AppState>) -> Result<(), ErrorInfo> {
-//     let config_path = Config::get_config_path();
-//     config.save_to_file(&config_path).map_err(ErrorInfo::from)?;
-//
-//     *state.config.write().await = config;
-//     Ok(())
-// }
+#[tauri::command]
+async fn get_current_config(state: tauri::State<'_, AppState>) -> Result<Config, ErrorInfo> {
+    let config = state.config.read().await;
+    Ok(config.clone())
+}
+
+#[tauri::command]
+async fn save_config(config: Config, state: tauri::State<'_, AppState>) -> Result<(), ErrorInfo> {
+    let config_path = Config::get_config_path();
+    config.save_to_file(&config_path).map_err(ErrorInfo::from)?;
+
+    *state.config.write().await = config;
+    Ok(())
+}
 
 #[tauri::command]
 async fn search_passwords_in_storage(
@@ -245,7 +302,7 @@ async fn search_passwords_in_storage(
             return Err(ErrorInfo {
                 code: 400,
                 info: "Invalid storage target".to_string(),
-            });
+            })
         }
     };
 
@@ -273,7 +330,7 @@ async fn get_all_passwords_from_storage(
             return Err(ErrorInfo {
                 code: 400,
                 info: "Invalid storage target".to_string(),
-            });
+            })
         }
     };
 
@@ -302,7 +359,7 @@ async fn get_password_by_id_from_storage(
             return Err(ErrorInfo {
                 code: 400,
                 info: "Invalid storage target".to_string(),
-            });
+            })
         }
     };
 
@@ -359,7 +416,7 @@ async fn sync_storages(
             return Err(ErrorInfo {
                 code: 400,
                 info: "Invalid from storage target".to_string(),
-            });
+            })
         }
     };
 
@@ -370,7 +427,7 @@ async fn sync_storages(
             return Err(ErrorInfo {
                 code: 400,
                 info: "Invalid to storage target".to_string(),
-            });
+            })
         }
     };
 
