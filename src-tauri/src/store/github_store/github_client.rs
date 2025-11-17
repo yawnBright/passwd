@@ -169,7 +169,7 @@ impl GithubClient {
         }
 
         let decoded = general_purpose::STANDARD
-            .decode(&file_content.content.replace("\n", ""))
+            .decode(file_content.content.replace("\n", ""))
             .map_err(|e| anyhow!("Failed to decode base64: {}", e))?;
 
         String::from_utf8(decoded).map_err(|e| anyhow!("Invalid UTF-8 content: {}", e))

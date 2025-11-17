@@ -1,3 +1,4 @@
+use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -112,5 +113,144 @@ impl Default for PasswordGeneratorConfig {
             require_numbers: true,
             require_symbols: true,
         }
+    }
+}
+
+/// 根据配置生成复杂密码
+///
+/// # 参数
+/// * `config` - 密码生成配置
+///
+/// # 返回
+/// * `Result<String, String>` - 成功返回生成的密码，失败返回错误信息
+///
+/// # 示例
+/// ```
+/// let config = PasswordGeneratorConfig {
+///     length: 12,
+///     exclude_chars: Some("O0l1".to_string()),
+///     require_uppercase: true,
+///     require_lowercase: true,
+///     require_numbers: true,
+///     require_symbols: true,
+/// };
+/// let password = generate_password(config)?;
+/// ```
+pub fn generate_password(config: &PasswordGeneratorConfig) -> Result<String> {
+    // 定义字符集
+    const UPPERCASE: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    const LOWERCASE: &str = "abcdefghijklmnopqrstuvwxyz";
+    const NUMBERS: &str = "0123456789";
+    const SYMBOLS: &str = "!@#$%^&*()_+-=[]{}|;:,.<>?";
+
+    // 根据配置构建可用字符集
+    let mut available_chars = String::new();
+    let mut required_chars = Vec::new();
+
+    // 添加小写字母
+    if config.require_lowercase {
+        available_chars.push_str(LOWERCASE);
+        // 确保至少包含一个小写字母
+        required_chars.push(get_random_char(LOWERCASE));
+    }
+
+    // 添加大写字母
+    if config.require_uppercase {
+        available_chars.push_str(UPPERCASE);
+        // 确保至少包含一个大写字母
+        required_chars.push(get_random_char(UPPERCASE));
+    }
+
+    // 添加数字
+    if config.require_numbers {
+        available_chars.push_str(NUMBERS);
+        // 确保至少包含一个数字
+        required_chars.push(get_random_char(NUMBERS));
+    }
+
+    // 添加特殊符号
+    if config.require_symbols {
+        available_chars.push_str(SYMBOLS);
+        // 确保至少包含一个特殊符号
+        required_chars.push(get_random_char(SYMBOLS));
+    }
+
+    // 如果没有选择任何字符类型，返回错误
+    if available_chars.is_empty() {
+        return Err(anyhow!("至少需要选择一种字符类型"));
+    }
+
+    // 处理排除字符
+    let mut filtered_chars = available_chars.clone();
+    if let Some(exclude) = &config.exclude_chars {
+        for exclude_char in exclude.chars() {
+            filtered_chars = filtered_chars.replace(exclude_char, "");
+        }
+    }
+
+    // 如果过滤后没有可用字符，返回错误
+    if filtered_chars.is_empty() {
+        return Err(anyhow!("排除字符后没有可用字符"));
+    }
+
+    // 生成随机密码
+    let mut password_chars = Vec::new();
+
+    // 首先添加必需的字符
+    password_chars.extend(&required_chars);
+
+    // 计算还需要多少字符
+    let remaining_length = config.length.saturating_sub(required_chars.len());
+
+    // 添加剩余的随机字符
+    for _ in 0..remaining_length {
+        password_chars.push(get_random_char(&filtered_chars));
+    }
+
+    // 打乱字符顺序以增加随机性
+    shuffle_chars(&mut password_chars);
+
+    // 组合成最终密码
+    let password: String = password_chars.into_iter().collect();
+
+    Ok(password)
+}
+
+/// 从字符串中随机选择一个字符
+fn get_random_char(chars: &str) -> char {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+
+    let rng = simple_rng(seed);
+    let index = rng % chars.len() as u64;
+    chars.chars().nth(index as usize).unwrap_or('a')
+}
+
+/// 简单的线性同余随机数生成器
+fn simple_rng(mut seed: u64) -> u64 {
+    seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+    seed % (1u64 << 31)
+}
+
+/// 打乱字符数组
+fn shuffle_chars(chars: &mut [char]) {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+
+    let mut rng = simple_rng(seed);
+
+    // Fisher-Yates 洗牌算法
+    for i in (1..chars.len()).rev() {
+        rng = simple_rng(rng);
+        let j = (rng % (i as u64 + 1)) as usize;
+        chars.swap(i, j);
     }
 }

@@ -2,18 +2,18 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use config::Config;
-use manager::{PasswordManager, StorageStatus};
+use crypto::EncryptedData;
+use manager::PasswordManager;
 use password::{Password, PasswordCreateRequest, PasswordGeneratorConfig};
-use std::collections::HashMap;
 use std::sync::Arc;
-use store::Storage;
+use store::StorageData;
+use store::StorageTarget;
 use tokio::sync::RwLock;
 
 mod config;
 mod crypto;
 mod manager;
 mod password;
-
 mod store;
 
 struct AppState {
@@ -42,17 +42,17 @@ pub fn run_tauri_app() {
             add_password,
             delete_password,
             search_passwords,
-            search_passwords_in_storage,
-            get_all_passwords,
+            // search_passwords_in_storage,
+            // get_all_passwords,
             get_all_passwords_from_storage,
-            get_password_by_id,
-            get_password_by_id_from_storage,
+            // get_password_by_id,
+            // get_password_by_id_from_storage,
             decrypt_password,
             generate_password,
             // get_current_config,
             // save_config,
-            get_storage_status,
-            sync_storages
+            // get_storage_status,
+            // sync_storages
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -66,8 +66,8 @@ struct ErrorInfo {
 
 #[derive(serde::Serialize)]
 struct InitializeResult {
-    is_first_setup: bool,
-    has_encrypted_data: bool,
+    // is_first_setup: bool,
+    // has_encrypted_data: bool,
 }
 
 impl From<anyhow::Error> for ErrorInfo {
@@ -81,10 +81,24 @@ impl From<anyhow::Error> for ErrorInfo {
 
 #[tauri::command]
 async fn initialize_manager(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<InitializeResult, ErrorInfo> {
-    let config_path = Config::get_config_path();
-    let config = Config::load_from_file(&config_path).unwrap_or_else(|_| Config::default());
+    // Try to load existing config, or create default
+    let mut config = {
+        let config_path = Config::get_full_config_path(&app)
+            .await
+            .unwrap_or_else(|_| {
+                // Fallback to relative path if Tauri path resolution fails
+                Config::get_config_path()
+            });
+        Config::load_from_file(&config_path).unwrap_or_default()
+    };
+
+    // Resolve data path using Tauri's cross-platform path resolution
+    if let Err(e) = config.resolve_data_path(&app).await {
+        eprintln!("Warning: Failed to resolve data path: {}", e);
+    }
 
     let password_manager = PasswordManager::new(config.clone())
         .await
@@ -95,8 +109,8 @@ async fn initialize_manager(
     // *state.config.write().await = config.clone();
 
     Ok(InitializeResult {
-        is_first_setup,
-        has_encrypted_data,
+        // is_first_setup,
+        // has_encrypted_data,
     })
 }
 
@@ -104,7 +118,7 @@ async fn initialize_manager(
 async fn add_password(
     request: PasswordCreateRequest,
     state: tauri::State<'_, AppState>,
-) -> Result<Password, ErrorInfo> {
+) -> Result<(), ErrorInfo> {
     let manager = state.password_manager.read().await;
     let manager = manager.as_ref().ok_or_else(|| ErrorInfo {
         code: 500,
@@ -148,37 +162,37 @@ async fn search_passwords(
         .map_err(ErrorInfo::from)
 }
 
-#[tauri::command]
-async fn get_all_passwords(state: tauri::State<'_, AppState>) -> Result<Vec<Password>, ErrorInfo> {
-    let manager = state.password_manager.read().await;
-    let manager = manager.as_ref().ok_or_else(|| ErrorInfo {
-        code: 500,
-        info: "Password manager not initialized".to_string(),
-    })?;
+// #[tauri::command]
+// async fn get_all_passwords(state: tauri::State<'_, AppState>) -> Result<Vec<Password>, ErrorInfo> {
+//     let manager = state.password_manager.read().await;
+//     let manager = manager.as_ref().ok_or_else(|| ErrorInfo {
+//         code: 500,
+//         info: "Password manager not initialized".to_string(),
+//     })?;
+//
+//     manager.get_all_passwords().await.map_err(ErrorInfo::from)
+// }
 
-    manager.get_all_passwords().await.map_err(ErrorInfo::from)
-}
-
-#[tauri::command]
-async fn get_password_by_id(
-    password_id: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<Option<Password>, ErrorInfo> {
-    let manager = state.password_manager.read().await;
-    let manager = manager.as_ref().ok_or_else(|| ErrorInfo {
-        code: 500,
-        info: "Password manager not initialized".to_string(),
-    })?;
-
-    manager
-        .get_password_by_id(&password_id)
-        .await
-        .map_err(ErrorInfo::from)
-}
+// #[tauri::command]
+// async fn get_password_by_id(
+//     password_id: String,
+//     state: tauri::State<'_, AppState>,
+// ) -> Result<Option<Password>, ErrorInfo> {
+//     let manager = state.password_manager.read().await;
+//     let manager = manager.as_ref().ok_or_else(|| ErrorInfo {
+//         code: 500,
+//         info: "Password manager not initialized".to_string(),
+//     })?;
+//
+//     manager
+//         .get_password_by_id(&password_id)
+//         .await
+//         .map_err(ErrorInfo::from)
+// }
 
 #[tauri::command]
 async fn decrypt_password(
-    password: Password,
+    password: EncryptedData,
     user_password: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, ErrorInfo> {
@@ -189,7 +203,7 @@ async fn decrypt_password(
     })?;
 
     manager
-        .decrypt_password_with_key(&password, &user_password)
+        .decrypt_password(&user_password, &password)
         .await
         .map_err(ErrorInfo::from)
 }
@@ -226,40 +240,40 @@ async fn generate_password(
 //     Ok(())
 // }
 
-#[tauri::command]
-async fn search_passwords_in_storage(
-    query: String,
-    storage_target: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<Vec<Password>, ErrorInfo> {
-    let manager = state.password_manager.read().await;
-    let manager = manager.as_ref().ok_or_else(|| ErrorInfo {
-        code: 500,
-        info: "Password manager not initialized".to_string(),
-    })?;
-
-    let target = match storage_target.as_str() {
-        "local" => StorageTarget::Local,
-        "github" => StorageTarget::GitHub,
-        _ => {
-            return Err(ErrorInfo {
-                code: 400,
-                info: "Invalid storage target".to_string(),
-            });
-        }
-    };
-
-    manager
-        .search_passwords_in_storage(&query, target)
-        .await
-        .map_err(ErrorInfo::from)
-}
+// #[tauri::command]
+// async fn search_passwords_in_storage(
+//     query: String,
+//     storage_target: String,
+//     state: tauri::State<'_, AppState>,
+// ) -> Result<Vec<Password>, ErrorInfo> {
+//     let manager = state.password_manager.read().await;
+//     let manager = manager.as_ref().ok_or_else(|| ErrorInfo {
+//         code: 500,
+//         info: "Password manager not initialized".to_string(),
+//     })?;
+//
+//     let target = match storage_target.as_str() {
+//         "local" => StorageTarget::Local,
+//         "github" => StorageTarget::GitHub,
+//         _ => {
+//             return Err(ErrorInfo {
+//                 code: 400,
+//                 info: "Invalid storage target".to_string(),
+//             });
+//         }
+//     };
+//
+//     manager
+//         .search_passwords_in_storage(&query, target)
+//         .await
+//         .map_err(ErrorInfo::from)
+// }
 
 #[tauri::command]
 async fn get_all_passwords_from_storage(
     storage_target: String,
     state: tauri::State<'_, AppState>,
-) -> Result<Vec<Password>, ErrorInfo> {
+) -> Result<StorageData, ErrorInfo> {
     let manager = state.password_manager.read().await;
     let manager = manager.as_ref().ok_or_else(|| ErrorInfo {
         code: 500,
@@ -283,99 +297,99 @@ async fn get_all_passwords_from_storage(
         .map_err(ErrorInfo::from)
 }
 
-#[tauri::command]
-async fn get_password_by_id_from_storage(
-    password_id: String,
-    storage_target: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<Option<Password>, ErrorInfo> {
-    let manager = state.password_manager.read().await;
-    let manager = manager.as_ref().ok_or_else(|| ErrorInfo {
-        code: 500,
-        info: "Password manager not initialized".to_string(),
-    })?;
+// #[tauri::command]
+// async fn get_password_by_id_from_storage(
+//     password_id: String,
+//     storage_target: String,
+//     state: tauri::State<'_, AppState>,
+// ) -> Result<Option<Password>, ErrorInfo> {
+//     let manager = state.password_manager.read().await;
+//     let manager = manager.as_ref().ok_or_else(|| ErrorInfo {
+//         code: 500,
+//         info: "Password manager not initialized".to_string(),
+//     })?;
+//
+//     let target = match storage_target.as_str() {
+//         "local" => StorageTarget::Local,
+//         "github" => StorageTarget::GitHub,
+//         _ => {
+//             return Err(ErrorInfo {
+//                 code: 400,
+//                 info: "Invalid storage target".to_string(),
+//             });
+//         }
+//     };
+//
+//     manager
+//         .get_password_by_id_from_storage(&password_id, target)
+//         .await
+//         .map_err(ErrorInfo::from)
+// }
 
-    let target = match storage_target.as_str() {
-        "local" => StorageTarget::Local,
-        "github" => StorageTarget::GitHub,
-        _ => {
-            return Err(ErrorInfo {
-                code: 400,
-                info: "Invalid storage target".to_string(),
-            });
-        }
-    };
+// #[tauri::command]
+// async fn get_storage_status(
+//     state: tauri::State<'_, AppState>,
+// ) -> Result<serde_json::Value, ErrorInfo> {
+//     let manager = state.password_manager.read().await;
+//     let manager = manager.as_ref().ok_or_else(|| ErrorInfo {
+//         code: 500,
+//         info: "Password manager not initialized".to_string(),
+//     })?;
+//
+//     let status = manager.get_storage_status().await;
+//     let mut result = HashMap::new();
+//
+//     for (target, status) in status {
+//         let key = match target {
+//             StorageTarget::Local => "local",
+//             StorageTarget::GitHub => "github",
+//             StorageTarget::All => "all",
+//         };
+//         result.insert(key.to_string(), status);
+//     }
+//
+//     Ok(serde_json::to_value(result).map_err(|e| ErrorInfo {
+//         code: 500,
+//         info: format!("Failed to serialize storage status: {}", e),
+//     })?)
+// }
 
-    manager
-        .get_password_by_id_from_storage(&password_id, target)
-        .await
-        .map_err(ErrorInfo::from)
-}
-
-#[tauri::command]
-async fn get_storage_status(
-    state: tauri::State<'_, AppState>,
-) -> Result<serde_json::Value, ErrorInfo> {
-    let manager = state.password_manager.read().await;
-    let manager = manager.as_ref().ok_or_else(|| ErrorInfo {
-        code: 500,
-        info: "Password manager not initialized".to_string(),
-    })?;
-
-    let status = manager.get_storage_status().await;
-    let mut result = HashMap::new();
-
-    for (target, status) in status {
-        let key = match target {
-            StorageTarget::Local => "local",
-            StorageTarget::GitHub => "github",
-            StorageTarget::All => "all",
-        };
-        result.insert(key.to_string(), status);
-    }
-
-    Ok(serde_json::to_value(result).map_err(|e| ErrorInfo {
-        code: 500,
-        info: format!("Failed to serialize storage status: {}", e),
-    })?)
-}
-
-#[tauri::command]
-async fn sync_storages(
-    from_storage: String,
-    to_storage: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), ErrorInfo> {
-    let manager = state.password_manager.read().await;
-    let manager = manager.as_ref().ok_or_else(|| ErrorInfo {
-        code: 500,
-        info: "Password manager not initialized".to_string(),
-    })?;
-
-    let from_target = match from_storage.as_str() {
-        "local" => StorageTarget::Local,
-        "github" => StorageTarget::GitHub,
-        _ => {
-            return Err(ErrorInfo {
-                code: 400,
-                info: "Invalid from storage target".to_string(),
-            });
-        }
-    };
-
-    let to_target = match to_storage.as_str() {
-        "local" => StorageTarget::Local,
-        "github" => StorageTarget::GitHub,
-        _ => {
-            return Err(ErrorInfo {
-                code: 400,
-                info: "Invalid to storage target".to_string(),
-            });
-        }
-    };
-
-    manager
-        .sync_storages(from_target, to_target)
-        .await
-        .map_err(ErrorInfo::from)
-}
+// #[tauri::command]
+// async fn sync_storages(
+//     from_storage: String,
+//     to_storage: String,
+//     state: tauri::State<'_, AppState>,
+// ) -> Result<(), ErrorInfo> {
+//     let manager = state.password_manager.read().await;
+//     let manager = manager.as_ref().ok_or_else(|| ErrorInfo {
+//         code: 500,
+//         info: "Password manager not initialized".to_string(),
+//     })?;
+//
+//     let from_target = match from_storage.as_str() {
+//         "local" => StorageTarget::Local,
+//         "github" => StorageTarget::GitHub,
+//         _ => {
+//             return Err(ErrorInfo {
+//                 code: 400,
+//                 info: "Invalid from storage target".to_string(),
+//             });
+//         }
+//     };
+//
+//     let to_target = match to_storage.as_str() {
+//         "local" => StorageTarget::Local,
+//         "github" => StorageTarget::GitHub,
+//         _ => {
+//             return Err(ErrorInfo {
+//                 code: 400,
+//                 info: "Invalid to storage target".to_string(),
+//             });
+//         }
+//     };
+//
+//     manager
+//         .sync_storages(from_target, to_target)
+//         .await
+//         .map_err(ErrorInfo::from)
+// }

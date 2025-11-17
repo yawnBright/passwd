@@ -6,7 +6,7 @@ use tokio::sync::RwLock;
 
 use crate::config::Config;
 
-use crate::crypto;
+use crate::crypto::EncryptedData;
 use crate::password::{
     Password, PasswordCreateRequest, PasswordGeneratorConfig, PasswordSearchQuery,
     PasswordUpdateRequest,
@@ -14,6 +14,7 @@ use crate::password::{
 use crate::store::github_store::GithubStorage;
 use crate::store::local_store::LocalStorage;
 use crate::store::{Storage, StorageData, StorageTarget};
+use crate::{crypto, password};
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StorageStatus {
@@ -26,11 +27,10 @@ pub struct StorageStatus {
 
 // 每个存储点是独立的、互不干扰的(防止数据覆盖丢失)
 // 后续考虑设计存储点间的数据同步机制
-
 pub struct PasswordManager {
     config: Arc<RwLock<Config>>,
     storages: HashMap<StorageTarget, Arc<dyn Storage>>, // 所有启用的存储点
-    cache: Arc<RwLock<HashMap<StorageTarget, StorageData>>>,
+    cache: Arc<RwLock<HashMap<StorageTarget, StorageData>>>, // 缓存策略是写透
 }
 
 impl PasswordManager {
@@ -39,25 +39,25 @@ impl PasswordManager {
         let mut storages = HashMap::new();
 
         // 初始化本地存储（如果启用）
-        if let Some(local_config) = &config.storage.local_storage {
-            if local_config.enabled {
-                let local_storage = Arc::new(LocalStorage::new(local_config.data_path.clone()));
-                storages.insert(StorageTarget::Local, local_storage as Arc<dyn Storage>);
-            }
+        if let Some(local_config) = &config.storage.local_storage
+            && local_config.enabled
+        {
+            let local_storage = Arc::new(LocalStorage::new(local_config.data_path.clone()));
+            storages.insert(StorageTarget::Local, local_storage as Arc<dyn Storage>);
         }
 
         // 初始化GitHub存储（如果启用）
-        if let Some(github_config) = &config.storage.github_storage {
-            if github_config.enabled {
-                let github_storage = Arc::new(GithubStorage::new(
-                    github_config.owner.clone(),
-                    github_config.repo.clone(),
-                    github_config.token.clone(),
-                    github_config.branch.clone(),
-                    github_config.file_path.clone(),
-                ));
-                storages.insert(StorageTarget::GitHub, github_storage as Arc<dyn Storage>);
-            }
+        if let Some(github_config) = &config.storage.github_storage
+            && github_config.enabled
+        {
+            let github_storage = Arc::new(GithubStorage::new(
+                github_config.owner.clone(),
+                github_config.repo.clone(),
+                github_config.token.clone(),
+                github_config.branch.clone(),
+                github_config.file_path.clone(),
+            ));
+            storages.insert(StorageTarget::GitHub, github_storage as Arc<dyn Storage>);
         }
 
         let manager = Self {
@@ -67,7 +67,7 @@ impl PasswordManager {
         };
 
         // 加载数据到缓存
-        manager.load_data().await?;
+        manager.load_data_to_cache().await?;
 
         Ok(manager)
     }
@@ -80,10 +80,22 @@ impl PasswordManager {
         let password_id = password.id.clone();
 
         // 添加到缓存
-        // self.cache
-        //     .write()
-        //     .await
-        //     .insert(password_id.clone(), password);
+        let mut cache_ref = self.cache.write().await;
+        let time_now = Utc::now();
+        for k in self.storages.keys() {
+            if let Some(data) = cache_ref.get_mut(k) {
+                data.passwords.insert(password_id.clone(), password.clone());
+                data.metadata.password_count += 1;
+                data.metadata.last_sync = time_now;
+            } else {
+                let mut data = StorageData::new();
+                data.passwords.insert(password_id.clone(), password.clone());
+                data.metadata.password_count += 1;
+                data.metadata.last_sync = time_now;
+
+                cache_ref.insert(*k, data);
+            }
+        }
 
         // 保存到存储
         self.save_data().await?;
@@ -91,252 +103,104 @@ impl PasswordManager {
         Ok(())
     }
 
-    async fn add_password_to_cache(&self, p: Password) {}
-
     pub async fn delete_password(&self, password_id: &str) -> Result<()> {
+        let mut cache_inner = self.cache.write().await;
+
+        let time_now = Utc::now();
+
         // 从缓存中删除
-        // if self.cache.write().await.remove(password_id).is_none() {
-        //     return Err(anyhow!("Password not found"));
-        // }
+        for t in self.storages.keys() {
+            if let Some(data) = cache_inner.get_mut(t)
+                && data.passwords.remove(password_id).is_some()
+            {
+                data.metadata.password_count -= 1;
+                data.metadata.last_sync = time_now;
+            }
+        }
 
         // 保存到存储
-        // self.save_data().await?;
+        self.save_data().await?;
 
         Ok(())
     }
 
     pub async fn search_passwords(&self, query: &str) -> Result<Vec<Password>> {
-        self.search_passwords_in_storage(query, StorageTarget::All)
-            .await
-    }
+        let mut ret = HashMap::new();
 
-    /// 在指定存储点中搜索密码
-    pub async fn search_passwords_in_storage(
-        &self,
-        query: &str,
-        target: StorageTarget,
-    ) -> Result<Vec<Password>> {
-        // if target == StorageTarget::All {
-        //     // 使用缓存数据（已合并所有存储点）
-        //     let cache = self.cache.read().await;
-        //     let results: Vec<Password> = cache
-        //         .values()
-        //         .filter(|password| {
-        //             password
-        //                 .title
-        //                 .to_lowercase()
-        //                 .contains(&query.to_lowercase())
-        //                 || password
-        //                     .description
-        //                     .to_lowercase()
-        //                     .contains(&query.to_lowercase())
-        //                 || password
-        //                     .tags
-        //                     .iter()
-        //                     .any(|tag| tag.to_lowercase().contains(&query.to_lowercase()))
-        //         })
-        //         .cloned()
-        //         .collect();
-        //     Ok(results)
-        // } else {
-        //     // 从指定存储点查询
-        //     let data = self.load_from_storage(target).await?;
-        //     let results: Vec<Password> = data
-        //         .passwords
-        //         .values()
-        //         .filter(|password| {
-        //             password
-        //                 .title
-        //                 .to_lowercase()
-        //                 .contains(&query.to_lowercase())
-        //                 || password
-        //                     .description
-        //                     .to_lowercase()
-        //                     .contains(&query.to_lowercase())
-        //                 || password
-        //                     .tags
-        //                     .iter()
-        //                     .any(|tag| tag.to_lowercase().contains(&query.to_lowercase()))
-        //         })
-        //         .cloned()
-        //         .collect();
-        //       Ok(results)
-        Ok(vec![])
-    }
-
-    // pub async fn get_all_passwords(&self) -> Result<Vec<Password>> {
-    //     self.get_all_passwords_from_storage(StorageTarget::All)
-    //         .await
-    // }
-
-    // 从指定存储点获取所有密码
-    // pub async fn get_all_passwords_from_storage(
-    //     &self,
-    //     target: StorageTarget,
-    // ) -> Result<Vec<Password>> {
-    //     if target == StorageTarget::All {
-    //         // 使用缓存数据（已合并所有存储点）
-    //         let cache = self.cache.read().await;
-    //         Ok(cache.values().cloned().collect())
-    //     } else {
-    //         // 从指定存储点查询
-    //         let data = self.load_from_storage(target).await?;
-    //         Ok(data.passwords.values().cloned().collect())
-    //     }
-    // }
-
-    pub async fn get_password_by_id(&self, password_id: &str) -> Result<Option<Password>> {
-        self.get_password_by_id_from_storage(password_id, StorageTarget::All)
-            .await
-    }
-
-    /// 从指定存储点根据ID获取密码
-    pub async fn get_password_by_id_from_storage(
-        &self,
-        password_id: &str,
-        target: StorageTarget,
-    ) -> Result<Option<Password>> {
-        if target == StorageTarget::All {
-            // 使用缓存数据（已合并所有存储点）
-            let cache = self.cache.read().await;
-            Ok(cache.get(password_id).cloned())
-        } else {
-            // 从指定存储点查询
-            let data = self.load_from_storage(target).await?;
-            Ok(data.passwords.get(password_id).cloned())
-        }
-    }
-
-    #[allow(dead_code)]
-    pub async fn decrypt_password(&self, _password: &Password) -> Result<String> {
-        // 使用用户提供的密码解密
-        Err(anyhow!("请使用用户提供的密码解密"))
-    }
-
-    pub async fn decrypt_password_with_key(
-        &self,
-        password: &Password,
-        _user_password: &str,
-    ) -> Result<String> {
-        // 使用用户提供的密码进行解密
-        // 注意：这里应该使用用户提供的密码生成密钥，但为了简化，我们使用内置密钥
-        // 在实际应用中，这里应该使用用户密码派生密钥
-        let user_crypto = SimpleCrypto::new(); // 使用相同的内置密钥
-        user_crypto.decrypt_with_checksum(&password.encrypted_password)
-    }
-
-    #[allow(dead_code)]
-    pub async fn update_password(
-        &self,
-        password_id: &str,
-        request: crate::password::PasswordUpdateRequest,
-    ) -> Result<Password> {
-        let mut cache = self.cache.write().await;
-        let password = cache
-            .get_mut(password_id)
-            .ok_or_else(|| anyhow!("Password not found"))?;
-
-        // 如果有新密码，需要加密
-        let encrypted_password = if let Some(ref new_password) = request.password {
-            Some(self.simple_crypto.encrypt_with_checksum(new_password)?)
-        } else {
-            None
-        };
-
-        password.update(request, encrypted_password);
-        let updated_password = password.clone();
-        drop(cache);
-
-        // 保存到存储
-        self.save_data().await?;
-
-        Ok(updated_password)
-    }
-
-    pub async fn generate_password(&self, config: &PasswordGeneratorConfig) -> Result<String> {
-        CryptoService::generate_password(config)
-    }
-
-    #[allow(dead_code)]
-    pub async fn get_config(&self) -> Config {
-        self.config.read().await.clone()
-    }
-
-    #[allow(dead_code)]
-    pub async fn update_config(&self, new_config: Config) -> Result<()> {
-        *self.config.write().await = new_config;
-        self.save_data().await?;
-        Ok(())
-    }
-
-    async fn load_data(&self) -> Result<()> {
-        let mut all_passwords = HashMap::new();
-
-        // 按优先级加载所有存储点的数据（本地优先）
-        let storage_order = [StorageTarget::Local, StorageTarget::GitHub];
-
-        for &target in &storage_order {
-            if let Some(storage) = self.storages.get(&target) {
-                match storage.load().await {
-                    Ok(data) => {
-                        // 合并数据，后面的存储点数据会覆盖前面的
-                        all_passwords.extend(data.passwords);
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to load from {:?} storage: {}", target, e);
-                    }
-                }
+        let cache_inner = self.cache.read().await;
+        // 直接从缓存中查询
+        for t in self.storages.keys() {
+            if let Some(data) = cache_inner.get(t) {
+                let parts = Self::search_in_storagedata(query, data);
+                parts.into_iter().for_each(|p| {
+                    ret.insert(p.id.clone(), p);
+                });
             }
         }
 
-        // 更新缓存
-        let mut cache = self.cache.write().await;
-        cache.extend(all_passwords);
+        Ok(ret.into_values().collect())
+    }
 
+    #[inline]
+    fn search_in_storagedata(query: &str, data: &StorageData) -> Vec<Password> {
+        let mut ret = vec![];
+
+        for p in data.passwords.values() {
+            if Self::is_content_match(&p.title, query)
+                || Self::is_content_match(&p.description, query)
+            {
+                ret.push(p.clone());
+            }
+        }
+
+        ret
+    }
+
+    #[inline]
+    fn is_content_match(s: &str, p: &str) -> bool {
+        // 先简单的使用字符串全匹配
+        s.contains(p)
+    }
+
+    pub async fn decrypt_password(&self, key: &str, data: &EncryptedData) -> Result<String> {
+        crypto::decrypt_with_password(data, key)
+    }
+
+    pub async fn generate_password(&self, config: &PasswordGeneratorConfig) -> Result<String> {
+        password::generate_password(config)
+    }
+
+    async fn load_data_to_cache(&self) -> Result<()> {
+        let mut cache_inner = self.cache.write().await;
+        for (t, s) in self.storages.iter() {
+            let data = s.load().await?;
+            cache_inner.insert(*t, data);
+        }
         Ok(())
     }
 
     async fn save_data(&self) -> Result<()> {
         let cache = self.cache.read().await;
-        let data = StorageData {
-            metadata: crate::store::StorageMetadata {
-                version: "1.0.0".to_string(),
-                last_sync: chrono::Utc::now(),
-                password_count: cache.len(),
-            },
-            passwords: cache.clone(),
-        };
-        drop(cache);
 
         // 保存到所有启用的存储点
-        let mut last_error = None;
-        for (target, storage) in &self.storages {
-            if let Err(e) = storage.save(&data).await {
-                log::warn!("Failed to save to {:?} storage: {}", target, e);
-                last_error = Some(e);
+        let mut err = None;
+        for (target, data) in cache.iter() {
+            if let Some(storage) = self.storages.get(target) {
+                if let Err(e) = storage.save(data).await {
+                    err = match err {
+                        None => Some(e.context(format!("Failed to save to {}", target))),
+                        Some(_e) => Some(anyhow!("{}\nFailed to save to {}: {}", _e, target, e)),
+                    };
+                }
+            } else {
+                err = match err {
+                    None => Some(anyhow!("storage target {} is None", target)),
+                    Some(e) => Some(anyhow!("{}\nstorage target {} is None", e, target)),
+                };
             }
         }
 
-        if let Some(error) = last_error {
-            Err(anyhow!("Failed to save to some storage targets: {}", error))
-        } else {
-            Ok(())
-        }
-    }
-
-    async fn update_cache_from_data(&self, data: StorageData) -> Result<()> {
-        let mut cache = self.cache.write().await;
-        *cache = data.passwords;
-        Ok(())
-    }
-
-    /// 获取指定存储点的存储实例
-    pub fn get_storage(&self, target: StorageTarget) -> Option<Arc<dyn Storage>> {
-        if target == StorageTarget::All {
-            None
-        } else {
-            self.storages.get(&target).cloned()
-        }
+        if let Some(e) = err { Err(e) } else { Ok(()) }
     }
 
     /// 获取所有启用的存储点
@@ -371,7 +235,7 @@ impl PasswordManager {
         self.save_to_storage(to, &from_data).await?;
 
         // 重新加载缓存
-        self.load_data().await?;
+        self.load_data_to_cache().await?;
 
         Ok(())
     }
@@ -403,9 +267,14 @@ impl PasswordManager {
         status
     }
 
-    // 不再需要主密码验证
-    #[allow(dead_code)]
-    pub async fn test_master_password(&self) -> Result<bool> {
-        Ok(true) // 始终返回true，因为不再使用主密码
+    pub async fn get_all_passwords_from_storage(
+        &self,
+        target: StorageTarget,
+    ) -> Result<StorageData> {
+        if let Some(data) = self.cache.read().await.get(&target) {
+            Ok(data.clone())
+        } else {
+            Err(anyhow!("此存储点中没有数据"))
+        }
     }
 }

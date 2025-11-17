@@ -1,8 +1,11 @@
 use anyhow::{Result, anyhow};
-// use dirs;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+
+// Use Tauri's path API for cross-platform compatibility
+use tauri::Manager;
+use tauri::path::BaseDirectory;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
@@ -41,15 +44,14 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        let data_dir = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("password_manager");
+        // Use relative path that will be resolved by Tauri's path API when needed
+        let data_path = PathBuf::from("passwords.json");
 
         Self {
             storage: StorageConfig {
                 local_storage: Some(LocalStorageConfig {
                     enabled: true,
-                    data_path: data_dir.join("passwords.json"),
+                    data_path,
                 }),
                 github_storage: None,
             },
@@ -91,34 +93,33 @@ impl Config {
         Ok(())
     }
 
-    // FIXME: android 文件系统限制
+    // Cross-platform config path using Tauri's AppConfig directory
     pub fn get_config_path() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("password_manager")
-            .join("config.json")
+        // For mobile platforms (Android/iOS), use AppConfig directory
+        // For desktop platforms, this will use appropriate system config directories
+        PathBuf::from("password_manager").join("config.json")
     }
 
-    // pub fn validate(&self) -> Result<()> {
-    //     if self.storage.local_storage.enabled
-    //         && self.storage.local_storage.data_path.as_os_str().is_empty()
-    //     {
-    //         return Err(anyhow!("Local storage path cannot be empty"));
-    //     }
-    //
-    //     if let Some(github) = &self.storage.github_storage {
-    //         if github.enabled {
-    //             if github.owner.is_empty() || github.repo.is_empty() || github.token.is_empty() {
-    //                 return Err(anyhow!("GitHub storage configuration is incomplete"));
-    //             }
-    //         }
-    //     }
-    //
-    //     Ok(())
-    // }
+    // Get the full config path using Tauri's path resolution
+    pub async fn get_full_config_path(app_handle: &tauri::AppHandle) -> Result<PathBuf> {
+        let config_dir = app_handle
+            .path()
+            .resolve("password_manager", BaseDirectory::AppConfig)
+            .map_err(|e| anyhow!("Failed to resolve config directory: {}", e))?;
 
-    // // 不再需要设置主密码哈希 - 直接使用主密钥验证
-    // pub fn set_encryption_salt(&mut self, salt: Vec<u8>) {
-    //     self.security.encryption_salt = salt;
-    // }
+        Ok(config_dir.join("config.json"))
+    }
+
+    // Resolve data path using Tauri's AppData directory
+    pub async fn resolve_data_path(&mut self, app_handle: &tauri::AppHandle) -> Result<()> {
+        if let Some(local_storage) = &mut self.storage.local_storage {
+            let data_dir = app_handle
+                .path()
+                .resolve("password_manager", BaseDirectory::AppData)
+                .map_err(|e| anyhow!("Failed to resolve data directory: {}", e))?;
+
+            local_storage.data_path = data_dir.join("passwords.json");
+        }
+        Ok(())
+    }
 }
