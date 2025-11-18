@@ -14,7 +14,7 @@ use crate::password::{
 use crate::store::github_store::GithubStorage;
 use crate::store::local_store::LocalStorage;
 use crate::store::{Storage, StorageData, StorageTarget};
-use crate::{crypto, password};
+use crate::{crypto, info, password};
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StorageStatus {
@@ -75,6 +75,8 @@ impl PasswordManager {
     pub async fn add_password(&self, request: PasswordCreateRequest) -> Result<()> {
         let encrypted_password = crypto::encrypt_with_password(&request.password, &request.key)?;
 
+        info!("加密后的密码: {:?}", encrypted_password);
+
         // 创建密码对象
         let password = Password::new(request, encrypted_password);
         let password_id = password.id.clone();
@@ -97,8 +99,12 @@ impl PasswordManager {
             }
         }
 
+        drop(cache_ref);
+
         // 保存到存储
         self.save_data().await?;
+
+        info!("密码 {} 已成功添加", password_id);
 
         Ok(())
     }
