@@ -2,8 +2,6 @@ use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-
-// Use Tauri's path API for cross-platform compatibility
 use tauri::Manager;
 use tauri::path::BaseDirectory;
 
@@ -16,7 +14,7 @@ pub struct StorageConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalStorageConfig {
     pub enabled: bool,
-    pub data_path: PathBuf,
+    // pub data_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +35,7 @@ pub struct GithubStorageConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    pub is_first_setup: bool,
     pub storage: StorageConfig,
     // pub security: SecurityConfig,
     pub version: String,
@@ -45,14 +44,12 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         // Use relative path that will be resolved by Tauri's path API when needed
-        let data_path = PathBuf::from("passwords.json");
+        // let data_path = PathBuf::from("passwords.json");
 
         Self {
+            is_first_setup: true,
             storage: StorageConfig {
-                local_storage: Some(LocalStorageConfig {
-                    enabled: true,
-                    data_path,
-                }),
+                local_storage: Some(LocalStorageConfig { enabled: true }),
                 github_storage: None,
             },
             // security: SecurityConfig {
@@ -65,13 +62,13 @@ impl Default for Config {
 }
 
 impl Config {
-    pub fn new() -> Self {
-        Self::default()
-    }
+    // pub fn new() -> Self {
+    //     Self::default()
+    // }
 
     pub fn load_from_file(path: &PathBuf) -> Result<Self> {
-        let content =
-            fs::read_to_string(path).map_err(|e| anyhow!("Failed to read config file: {}", e))?;
+        let content = fs::read_to_string(path)
+            .map_err(|e| anyhow!("Failed to read config file[{:?}]: {}", path.to_str(), e))?;
 
         let config: Config =
             serde_json::from_str(&content).map_err(|e| anyhow!("Failed to parse config: {}", e))?;
@@ -94,32 +91,14 @@ impl Config {
     }
 
     // Cross-platform config path using Tauri's AppConfig directory
-    pub fn get_config_path() -> PathBuf {
-        // For mobile platforms (Android/iOS), use AppConfig directory
-        // For desktop platforms, this will use appropriate system config directories
-        PathBuf::from("password_manager").join("config.json")
-    }
-
-    // Get the full config path using Tauri's path resolution
-    pub async fn get_full_config_path(app_handle: &tauri::AppHandle) -> Result<PathBuf> {
-        let config_dir = app_handle
+    pub fn get_config_path(app_handle: &tauri::AppHandle) -> tauri::Result<PathBuf> {
+        app_handle
             .path()
-            .resolve("password_manager", BaseDirectory::AppConfig)
-            .map_err(|e| anyhow!("Failed to resolve config directory: {}", e))?;
-
-        Ok(config_dir.join("config.json"))
+            .resolve("config.json", BaseDirectory::AppConfig)
     }
-
-    // Resolve data path using Tauri's AppData directory
-    pub async fn resolve_data_path(&mut self, app_handle: &tauri::AppHandle) -> Result<()> {
-        if let Some(local_storage) = &mut self.storage.local_storage {
-            let data_dir = app_handle
-                .path()
-                .resolve("password_manager", BaseDirectory::AppData)
-                .map_err(|e| anyhow!("Failed to resolve data directory: {}", e))?;
-
-            local_storage.data_path = data_dir.join("passwords.json");
-        }
-        Ok(())
+    pub fn get_data_path(app_handle: &tauri::AppHandle) -> tauri::Result<PathBuf> {
+        app_handle
+            .path()
+            .resolve("passwords.json", BaseDirectory::AppData)
     }
 }

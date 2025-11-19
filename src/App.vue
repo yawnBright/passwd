@@ -136,8 +136,9 @@ async function initializeApp() {
     await loadPasswords();
     addLog("初始加载密码成功");
   } catch (e) {
-    error.value = `初始化失败: ${e}`;
-    console.error("初始化错误:", e);
+    let _e = e as ErrorInfo;
+    error.value = `初始化失败: ${_e.info}`;
+    console.error("初始化错误:", _e);
   } finally {
     isLoading.value = false;
   }
@@ -202,7 +203,7 @@ async function deletePassword(id: string) {
   if (!confirm("确定要删除这个密码吗？")) return;
   
   try {
-    await invoke("delete_password", { password_id: id });
+    await invoke("delete_password", { passwordId: id });
     await loadPasswords();
   } catch (e) {
     error.value = `删除密码失败: ${e}`;
@@ -284,9 +285,9 @@ onMounted(() => {
     <h1>密码管理器</h1>
     
     <!-- 日志显示 -->
-    <div v-for="msg in logMessages" :key="msg" class="log-message">
+    <!-- <div v-for="msg in logMessages" :key="msg" class="log-message">
       {{ msg }}
-    </div>
+    </div> -->
 
     <!-- 错误显示 -->
     <div v-if="error" class="error-message">

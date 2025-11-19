@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -14,27 +14,44 @@ use crate::password::{
 use crate::store::github_store::GithubStorage;
 use crate::store::local_store::LocalStorage;
 use crate::store::{Storage, StorageData, StorageTarget};
-use crate::{crypto, info, password};
+use crate::{CONF_PATH, DATA_PATH, crypto, info, password};
 
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct StorageStatus {
-    pub enabled: bool,
-    pub connected: bool,
-    pub password_count: usize,
-    pub last_sync: Option<DateTime<Utc>>,
-    pub error: Option<String>,
-}
+// #[derive(Debug, Clone, serde::Serialize)]
+// pub struct StorageStatus {
+//     pub enabled: bool,
+//     pub connected: bool,
+//     pub password_count: usize,
+//     pub last_sync: Option<DateTime<Utc>>,
+//     pub error: Option<String>,
+// }
+
+type Storages = HashMap<StorageTarget, Arc<dyn Storage>>;
 
 // 每个存储点是独立的、互不干扰的(防止数据覆盖丢失)
 // 后续考虑设计存储点间的数据同步机制
 pub struct PasswordManager {
-    config: Arc<RwLock<Config>>,
-    storages: HashMap<StorageTarget, Arc<dyn Storage>>, // 所有启用的存储点
-    cache: Arc<RwLock<HashMap<StorageTarget, StorageData>>>, // 缓存策略是写透
+    config: RwLock<Config>,
+    storages: RwLock<Storages>,                         // 所有启用的存储点
+    cache: RwLock<HashMap<StorageTarget, StorageData>>, // 缓存策略是写透
 }
 
 impl PasswordManager {
     pub async fn new(config: Config) -> Result<Self> {
+        let storages = Self::build_storages_from_config(&config)?;
+
+        let manager = Self {
+            config: RwLock::new(config),
+            storages: RwLock::new(storages),
+            cache: RwLock::new(HashMap::new()),
+        };
+
+        // 加载数据到缓存
+        manager.load_data_to_cache().await?;
+
+        Ok(manager)
+    }
+
+    fn build_storages_from_config(config: &Config) -> Result<Storages> {
         // 初始化所有启用的存储点
         let mut storages = HashMap::new();
 
@@ -42,7 +59,11 @@ impl PasswordManager {
         if let Some(local_config) = &config.storage.local_storage
             && local_config.enabled
         {
-            let local_storage = Arc::new(LocalStorage::new(local_config.data_path.clone()));
+            let data_path = DATA_PATH
+                .get()
+                .ok_or_else(|| anyhow!("DATA_PATH not set"))?;
+
+            let local_storage = Arc::new(LocalStorage::new(data_path.clone()));
             storages.insert(StorageTarget::Local, local_storage as Arc<dyn Storage>);
         }
 
@@ -60,16 +81,25 @@ impl PasswordManager {
             storages.insert(StorageTarget::GitHub, github_storage as Arc<dyn Storage>);
         }
 
-        let manager = Self {
-            config: Arc::new(RwLock::new(config)),
-            storages,
-            cache: Arc::new(RwLock::new(HashMap::new())),
-        };
+        Ok(storages)
+    }
 
-        // 加载数据到缓存
-        manager.load_data_to_cache().await?;
+    // 更新配置
+    pub async fn update_config(&self, new_config: Config) -> Result<()> {
+        let mut config_inner = self.config.write().await;
+        let mut storage_inner = self.storages.write().await;
 
-        Ok(manager)
+        *config_inner = new_config;
+        *storage_inner = Self::build_storages_from_config(&config_inner)?;
+
+        // 保存新配置到文件
+        config_inner.save_to_file(
+            CONF_PATH
+                .get()
+                .ok_or_else(|| anyhow!("CONFIG_PATH not set"))?,
+        )?;
+
+        Ok(())
     }
 
     pub async fn add_password(&self, request: PasswordCreateRequest) -> Result<()> {
@@ -82,10 +112,12 @@ impl PasswordManager {
         let password_id = password.id.clone();
 
         // 添加到缓存
-        let mut cache_ref = self.cache.write().await;
+        let mut cache_inner = self.cache.write().await;
+        let storage_inner = self.storages.read().await;
+
         let time_now = Utc::now();
-        for k in self.storages.keys() {
-            if let Some(data) = cache_ref.get_mut(k) {
+        for k in storage_inner.keys() {
+            if let Some(data) = cache_inner.get_mut(k) {
                 data.passwords.insert(password_id.clone(), password.clone());
                 data.metadata.password_count += 1;
                 data.metadata.last_sync = time_now;
@@ -95,11 +127,12 @@ impl PasswordManager {
                 data.metadata.password_count += 1;
                 data.metadata.last_sync = time_now;
 
-                cache_ref.insert(*k, data);
+                cache_inner.insert(*k, data);
             }
         }
 
-        drop(cache_ref);
+        drop(cache_inner);
+        drop(storage_inner);
 
         // 保存到存储
         self.save_data().await?;
@@ -111,11 +144,12 @@ impl PasswordManager {
 
     pub async fn delete_password(&self, password_id: &str) -> Result<()> {
         let mut cache_inner = self.cache.write().await;
+        let storage_inner = self.storages.read().await;
 
         let time_now = Utc::now();
 
         // 从缓存中删除
-        for t in self.storages.keys() {
+        for t in storage_inner.keys() {
             if let Some(data) = cache_inner.get_mut(t)
                 && data.passwords.remove(password_id).is_some()
             {
@@ -123,6 +157,9 @@ impl PasswordManager {
                 data.metadata.last_sync = time_now;
             }
         }
+
+        drop(cache_inner);
+        drop(storage_inner);
 
         // 保存到存储
         self.save_data().await?;
@@ -134,8 +171,10 @@ impl PasswordManager {
         let mut ret = HashMap::new();
 
         let cache_inner = self.cache.read().await;
+        let storage_inner = self.storages.read().await;
+
         // 直接从缓存中查询
-        for t in self.storages.keys() {
+        for t in storage_inner.keys() {
             if let Some(data) = cache_inner.get(t) {
                 let parts = Self::search_in_storagedata(query, data);
                 parts.into_iter().for_each(|p| {
@@ -178,7 +217,9 @@ impl PasswordManager {
 
     async fn load_data_to_cache(&self) -> Result<()> {
         let mut cache_inner = self.cache.write().await;
-        for (t, s) in self.storages.iter() {
+        let storage_inner = self.storages.read().await;
+
+        for (t, s) in storage_inner.iter() {
             let data = s.load().await?;
             cache_inner.insert(*t, data);
         }
@@ -186,12 +227,13 @@ impl PasswordManager {
     }
 
     async fn save_data(&self) -> Result<()> {
-        let cache = self.cache.read().await;
+        let cache_inner = self.cache.read().await;
+        let storage_inner = self.storages.read().await;
 
         // 保存到所有启用的存储点
         let mut err = None;
-        for (target, data) in cache.iter() {
-            if let Some(storage) = self.storages.get(target) {
+        for (target, data) in cache_inner.iter() {
+            if let Some(storage) = storage_inner.get(target) {
                 if let Err(e) = storage.save(data).await {
                     err = match err {
                         None => Some(e.context(format!("Failed to save to {}", target))),
@@ -209,69 +251,74 @@ impl PasswordManager {
         if let Some(e) = err { Err(e) } else { Ok(()) }
     }
 
-    /// 获取所有启用的存储点
-    pub fn get_enabled_storages(&self) -> Vec<(StorageTarget, Arc<dyn Storage>)> {
-        self.storages
-            .iter()
-            .map(|(&target, storage)| (target, storage.clone()))
-            .collect()
-    }
+    // 获取配置
+    // pub fn get_config_ref(&self) -> Arc<RwLock<Config>> {
+    //     self.config.clone()
+    // }
 
-    /// 从指定存储点加载数据
-    pub async fn load_from_storage(&self, target: StorageTarget) -> Result<StorageData> {
-        let storage = self
-            .storages
-            .get(&target)
-            .ok_or_else(|| anyhow!("Storage target {:?} is not enabled", target))?;
-        storage.load().await
-    }
+    // 获取所有启用的存储点
+    // pub fn get_enabled_storages(&self) -> Vec<(StorageTarget, Arc<dyn Storage>)> {
+    //     self.storages
+    //         .iter()
+    //         .map(|(&target, storage)| (target, storage.clone()))
+    //         .collect()
+    // }
 
-    /// 保存数据到指定存储点
-    pub async fn save_to_storage(&self, target: StorageTarget, data: &StorageData) -> Result<()> {
-        let storage = self
-            .storages
-            .get(&target)
-            .ok_or_else(|| anyhow!("Storage target {:?} is not enabled", target))?;
-        storage.save(data).await
-    }
+    // 从指定存储点加载数据
+    // pub async fn load_from_storage(&self, target: StorageTarget) -> Result<StorageData> {
+    //     let storage = self
+    //         .storages
+    //         .get(&target)
+    //         .ok_or_else(|| anyhow!("Storage target {:?} is not enabled", target))?;
+    //     storage.load().await
+    // }
 
-    /// 同步两个存储点之间的数据
-    pub async fn sync_storages(&self, from: StorageTarget, to: StorageTarget) -> Result<()> {
-        let from_data = self.load_from_storage(from).await?;
-        self.save_to_storage(to, &from_data).await?;
+    // 保存数据到指定存储点
+    // pub async fn save_to_storage(&self, target: StorageTarget, data: &StorageData) -> Result<()> {
+    //     let storage = self
+    //         .storages
+    //         .get(&target)
+    //         .ok_or_else(|| anyhow!("Storage target {:?} is not enabled", target))?;
+    //     storage.save(data).await
+    // }
 
-        // 重新加载缓存
-        self.load_data_to_cache().await?;
+    // 同步两个存储点之间的数据
+    // pub async fn sync_storages(&self, from: StorageTarget, to: StorageTarget) -> Result<()> {
+    //     let from_data = self.load_from_storage(from).await?;
+    //     self.save_to_storage(to, &from_data).await?;
+    //
+    //     // 重新加载缓存
+    //     self.load_data_to_cache().await?;
+    //
+    //     Ok(())
+    // }
 
-        Ok(())
-    }
-
-    /// 获取存储点状态信息
-    pub async fn get_storage_status(&self) -> HashMap<StorageTarget, StorageStatus> {
-        let mut status = HashMap::new();
-
-        for (&target, storage) in &self.storages {
-            let storage_status = match storage.load().await {
-                Ok(data) => StorageStatus {
-                    enabled: true,
-                    connected: true,
-                    password_count: data.passwords.len(),
-                    last_sync: Some(data.metadata.last_sync),
-                    error: None,
-                },
-                Err(e) => StorageStatus {
-                    enabled: true,
-                    connected: false,
-                    password_count: 0,
-                    last_sync: None,
-                    error: Some(e.to_string()),
-                },
-            };
-            status.insert(target, storage_status);
-        }
-
-        status
-    }
+    // 获取存储点状态信息
+    // pub async fn get_storage_status(&self) -> HashMap<StorageTarget, StorageStatus> {
+    //     let mut status = HashMap::new();
+    //
+    //     for (&target, storage) in &self.storages {
+    //         let storage_status = match storage.load().await {
+    //             Ok(data) => StorageStatus {
+    //                 enabled: true,
+    //                 connected: true,
+    //                 password_count: data.passwords.len(),
+    //                 last_sync: Some(data.metadata.last_sync),
+    //                 error: None,
+    //             },
+    //             Err(e) => StorageStatus {
+    //                 enabled: true,
+    //                 connected: false,
+    //                 password_count: 0,
+    //                 last_sync: None,
+    //                 error: Some(e.to_string()),
+    //             },
+    //         };
+    //         status.insert(target, storage_status);
+    //     }
+    //
+    //     status
+    // }
 
     pub async fn get_all_passwords_from_storage(
         &self,

@@ -1,35 +1,18 @@
-use config::Config;
-use crypto::EncryptedData;
-use manager::PasswordManager;
-use password::{Password, PasswordCreateRequest, PasswordGeneratorConfig};
-use std::sync::Arc;
-use store::StorageData;
-use store::StorageTarget;
-use tokio::sync::RwLock;
-
 mod config;
 mod crypto;
+mod log;
 mod manager;
 mod password;
 mod store;
 
-// info宏 仅在debug模式下打印
-#[macro_export]
-macro_rules! info {
-    ($($arg:tt)*) => {
-        #[cfg(debug_assertions)]
-        println!("prefix: {}", format_args!($($arg)*));
-    };
-}
-
-// error宏 仅在debug模式下打印
-#[macro_export]
-macro_rules! error {
-    ($($arg:tt)*) => {
-        #[cfg(debug_assertions)]
-        eprintln!("prefix: {}", format_args!($($arg)*));
-    };
-}
+use config::Config;
+use crypto::EncryptedData;
+use manager::PasswordManager;
+use password::{Password, PasswordCreateRequest, PasswordGeneratorConfig};
+use std::path::PathBuf;
+use std::sync::OnceLock;
+use store::StorageData;
+use store::StorageTarget;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run_tauri_app() {
@@ -37,8 +20,12 @@ pub fn run_tauri_app() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_fs::init())
         .manage(AppState {
-            password_manager: Arc::new(RwLock::new(None)),
+            password_manager: OnceLock::new(),
             // config: Arc::new(RwLock::new(Config::default())),
+        })
+        .setup(|app| {
+            init(app.handle())?;
+            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             initialize_manager,
@@ -48,13 +35,41 @@ pub fn run_tauri_app() {
             get_all_passwords_from_storage,
             decrypt_password,
             generate_password,
+            update_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 
+static CONF_PATH: OnceLock<PathBuf> = OnceLock::new();
+static DATA_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+fn init(app: &tauri::AppHandle) -> anyhow::Result<()> {
+    let conf_path = Config::get_config_path(app)?;
+
+    CONF_PATH
+        .set(conf_path)
+        .map_err(|_| anyhow::anyhow!("CONF_PATH已初始化"))?;
+
+    let data_path = Config::get_data_path(app)?;
+    DATA_PATH
+        .set(data_path)
+        .map_err(|_| anyhow::anyhow!("DATA_PATH已初始化"))?;
+
+    info!(
+        "**配置路径**：{}",
+        CONF_PATH.get().unwrap().to_str().unwrap_or("空")
+    );
+
+    info!(
+        "**数据路径**：{}",
+        DATA_PATH.get().unwrap().to_str().unwrap_or("空")
+    );
+
+    Ok(())
+}
 struct AppState {
-    password_manager: Arc<RwLock<Option<PasswordManager>>>,
+    password_manager: OnceLock<PasswordManager>,
 }
 
 #[derive(serde::Serialize)]
@@ -65,7 +80,7 @@ struct ErrorInfo {
 
 #[derive(serde::Serialize)]
 struct InitializeResult {
-    // is_first_setup: bool,
+    is_first_setup: bool,
     // has_encrypted_data: bool,
 }
 
@@ -80,49 +95,40 @@ impl From<anyhow::Error> for ErrorInfo {
 
 #[tauri::command]
 async fn initialize_manager(
-    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<InitializeResult, ErrorInfo> {
-    // Try to load existing config, or create default
-    let mut config = {
-        let config_path = Config::get_full_config_path(&app)
-            .await
-            .unwrap_or_else(|_| {
-                // Fallback to relative path if Tauri path resolution fails
-                Config::get_config_path()
-            });
+    let conf_path = CONF_PATH.get().expect("[内部错误] sys init error");
 
-        info!("配置路径：{}", config_path.to_str().unwrap_or("空"));
+    let mut config = Config::default();
 
-        Config::load_from_file(&config_path).unwrap_or_default()
-    };
-
-    info!("配置：\n{:?}", &config);
-
-    // Resolve data path using Tauri's cross-platform path resolution
-    if let Err(e) = config.resolve_data_path(&app).await {
-        error!("解析 data path 失败: {}", e);
-
-        return Err(ErrorInfo {
-            code: 500,
-            info: e.to_string(),
-        });
+    if conf_path.exists() {
+        info!("配置文件存在，加载配置");
+        config = Config::load_from_file(conf_path)?;
+    } else {
+        info!("配置文件不存在，创建默认配置");
+        config.save_to_file(conf_path)?;
     }
 
-    let password_manager = PasswordManager::new(config.clone())
-        .await
-        .map_err(ErrorInfo::from)?;
+    info!("配置：{:?}", &config);
+
+    let is_first_setup = config.is_first_setup;
+
+    let password_manager = PasswordManager::new(config).await?;
 
     info!("密码管理器初始化完成");
 
-    // 更新状态
-    *state.password_manager.write().await = Some(password_manager);
-    // *state.config.write().await = config.clone();
+    // let is_first_setup = password_manager
+    //     .get_config_ref()
+    //     .read()
+    //     .await
+    //     .is_first_setup;
 
-    Ok(InitializeResult {
-        // is_first_setup,
-        // has_encrypted_data,
-    })
+    // 更新状态
+    if state.password_manager.set(password_manager).is_err() {
+        panic!("[内部错误] sys init error");
+    }
+
+    Ok(InitializeResult { is_first_setup })
 }
 
 #[tauri::command]
@@ -132,8 +138,7 @@ async fn add_password(
 ) -> Result<(), ErrorInfo> {
     info!("添加密码请求：{:?}", &request);
 
-    let manager = state.password_manager.read().await;
-    let manager = manager.as_ref().ok_or_else(|| ErrorInfo {
+    let manager = state.password_manager.get().ok_or_else(|| ErrorInfo {
         code: 500,
         info: "Password manager not initialized".to_string(),
     })?;
@@ -146,8 +151,7 @@ async fn delete_password(
     password_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), ErrorInfo> {
-    let manager = state.password_manager.read().await;
-    let manager = manager.as_ref().ok_or_else(|| ErrorInfo {
+    let manager = state.password_manager.get().ok_or_else(|| ErrorInfo {
         code: 500,
         info: "Password manager not initialized".to_string(),
     })?;
@@ -163,12 +167,10 @@ async fn search_passwords(
     query: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<Password>, ErrorInfo> {
-    let manager = state.password_manager.read().await;
-    let manager = manager.as_ref().ok_or_else(|| ErrorInfo {
+    let manager = state.password_manager.get().ok_or_else(|| ErrorInfo {
         code: 500,
         info: "Password manager not initialized".to_string(),
     })?;
-
     manager
         .search_passwords(&query)
         .await
@@ -181,12 +183,10 @@ async fn decrypt_password(
     user_password: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, ErrorInfo> {
-    let manager = state.password_manager.read().await;
-    let manager = manager.as_ref().ok_or_else(|| ErrorInfo {
+    let manager = state.password_manager.get().ok_or_else(|| ErrorInfo {
         code: 500,
         info: "Password manager not initialized".to_string(),
     })?;
-
     manager
         .decrypt_password(&user_password, &password)
         .await
@@ -198,8 +198,7 @@ async fn generate_password(
     config: PasswordGeneratorConfig,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, ErrorInfo> {
-    let manager = state.password_manager.read().await;
-    let manager = manager.as_ref().ok_or_else(|| ErrorInfo {
+    let manager = state.password_manager.get().ok_or_else(|| ErrorInfo {
         code: 500,
         info: "Password manager not initialized".to_string(),
     })?;
@@ -215,8 +214,7 @@ async fn get_all_passwords_from_storage(
     storage_target: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<StorageData, ErrorInfo> {
-    let manager = state.password_manager.read().await;
-    let manager = manager.as_ref().ok_or_else(|| ErrorInfo {
+    let manager = state.password_manager.get().ok_or_else(|| ErrorInfo {
         code: 500,
         info: "Password manager not initialized".to_string(),
     })?;
@@ -234,6 +232,23 @@ async fn get_all_passwords_from_storage(
 
     manager
         .get_all_passwords_from_storage(target)
+        .await
+        .map_err(ErrorInfo::from)
+}
+
+// 更新配置
+#[tauri::command]
+async fn update_config(
+    new_config: Config,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), ErrorInfo> {
+    let manager = state.password_manager.get().ok_or_else(|| ErrorInfo {
+        code: 500,
+        info: "Password manager not initialized".to_string(),
+    })?;
+
+    manager
+        .update_config(new_config)
         .await
         .map_err(ErrorInfo::from)
 }
