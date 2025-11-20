@@ -33,24 +33,16 @@ pub struct PasswordCreateRequest {
     pub key: String, // 用于加密的密码
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct PasswordUpdateRequest {
-    pub id: String,
-    pub title: Option<String>,
-    pub description: Option<String>,
-    pub tags: Option<Vec<String>>,
-    pub username: Option<String>,
-    pub password: Option<String>, // 明文密码，可选更新
-    pub url: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct PasswordSearchQuery {
-    pub keyword: String,
-    pub tags: Option<Vec<String>>,
-}
+// #[derive(Debug, Clone, Serialize, Deserialize)]
+// pub struct PasswordUpdateRequest {
+//     pub id: String,
+//     pub title: Option<String>,
+//     pub description: Option<String>,
+//     pub tags: Option<Vec<String>>,
+//     pub username: Option<String>,
+//     pub password: Option<String>, // 明文密码，可选更新
+//     pub url: Option<String>,
+// }
 
 impl Password {
     pub fn new(request: PasswordCreateRequest, encrypted_password: EncryptedData) -> Self {
@@ -68,29 +60,29 @@ impl Password {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn update(&mut self, request: PasswordUpdateRequest, encrypted_password: EncryptedData) {
-        if let Some(title) = request.title {
-            self.title = title;
-        }
-        if let Some(description) = request.description {
-            self.description = description;
-        }
-        if let Some(tags) = request.tags {
-            self.tags = tags;
-        }
-        if let Some(username) = request.username {
-            self.username = username;
-        }
-        // if let Some(password) = encrypted_password {
-        //     self.encrypted_password = password;
-        // }
-        self.encrypted_password = encrypted_password;
-        if let Some(url) = request.url {
-            self.url = Some(url);
-        }
-        self.updated_at = Utc::now();
-    }
+    // #[allow(dead_code)]
+    // pub fn update(&mut self, request: PasswordUpdateRequest, encrypted_password: EncryptedData) {
+    //     if let Some(title) = request.title {
+    //         self.title = title;
+    //     }
+    //     if let Some(description) = request.description {
+    //         self.description = description;
+    //     }
+    //     if let Some(tags) = request.tags {
+    //         self.tags = tags;
+    //     }
+    //     if let Some(username) = request.username {
+    //         self.username = username;
+    //     }
+    //     // if let Some(password) = encrypted_password {
+    //     //     self.encrypted_password = password;
+    //     // }
+    //     self.encrypted_password = encrypted_password;
+    //     if let Some(url) = request.url {
+    //         self.url = Some(url);
+    //     }
+    //     self.updated_at = Utc::now();
+    // }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

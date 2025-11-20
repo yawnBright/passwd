@@ -68,6 +68,15 @@ fn init(app: &tauri::AppHandle) -> anyhow::Result<()> {
 
     Ok(())
 }
+
+// 为什么这里需要一个OnceLock呢
+// 因为password_manager这个变量需要延迟初始化
+// 或至少等到app实例创建之后才能初始化
+//
+// 可以在setup里面初始化，但是这个初始化又是个异步的
+// 后面可以考虑使用同步块来解决
+//
+// 或者使用unsafe代码
 struct AppState {
     password_manager: OnceLock<PasswordManager>,
 }

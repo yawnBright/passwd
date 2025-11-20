@@ -7,10 +7,7 @@ use tokio::sync::RwLock;
 use crate::config::Config;
 
 use crate::crypto::EncryptedData;
-use crate::password::{
-    Password, PasswordCreateRequest, PasswordGeneratorConfig, PasswordSearchQuery,
-    PasswordUpdateRequest,
-};
+use crate::password::{Password, PasswordCreateRequest, PasswordGeneratorConfig};
 use crate::store::github_store::GithubStorage;
 use crate::store::local_store::LocalStorage;
 use crate::store::{Storage, StorageData, StorageTarget};
